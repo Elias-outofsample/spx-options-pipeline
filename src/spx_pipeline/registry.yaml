@@ -1,0 +1,369 @@
+# Dataset registry — the single declaration of every dataset the pipeline knows.
+#
+# Each entry says where the raw files are, where the store keeps them, the Arrow
+# schema to enforce, the columns to drop at ingestion, and the ordered cleaning
+# rules applied at load time. Adding a standard dataset needs no Python at all:
+# see docs/extending.md.
+#
+# Path placeholders: {year}, {month:02d}, {date} (YYYYMMDD). A '*' in source_path
+# marks bulk files that are streamed in batches instead of loaded whole.
+
+version: 2
+
+defaults:
+  compression: zstd
+  compression_level: 3
+  timezone: "America/New_York"
+  row_group_size: 300000
+
+# Old names kept working, so existing research code does not break.
+aliases:
+  td_spx_ohlc: spx_ohlc
+  td_vix_ohlc: vix_ohlc
+  td_vvix_ohlc: vvix_ohlc
+  td_greeks_0dte: greeks_0dte
+  td_greeks_1dte: greeks_1dte
+  td_greeks_2dte: greeks_2dte
+  td_greeks_3dte: greeks_3dte
+  td_greeks_4dte: greeks_4dte
+  td_greeks_5dte: greeks_5dte
+  td_greeks_6dte: greeks_6dte
+  td_greeks_7dte: greeks_7dte
+  spx_quote: quotes_0dte
+  td_quotes_0dte: quotes_0dte
+  td_quotes_1dte: quotes_1dte
+  iv_spx: iv_0dte
+  td_iv_0dte: iv_0dte
+  td_iv_1dte: iv_1dte
+  oi_spx: oi
+  td_oi: oi
+  td_eod: eod
+  spx_trade: trades_0dte
+
+# ---------------------------------------------------------------- templates
+# Keys starting with "x-" are YAML anchors only; they are not datasets.
+
+x-index-ohlc: &index_ohlc
+  source_format: parquet
+  partition_cols: [year, month]
+  granularity: 1min
+  schema:
+    timestamp: "timestamp[ns]"
+    open: float32
+    high: float32
+    low: float32
+    close: float32
+  drop_cols: []
+  cleaning_rules:
+    - drop_opening_bar: {time: "09:30:00"}
+  index_col: timestamp
+  rows_per_day: 390
+
+x-contract-schema: &contract_cols
+  symbol: utf8
+  expiration: utf8
+  strike: float32
+  right: utf8
+  timestamp: "timestamp[ns]"
+
+x-greeks: &greeks
+  source_format: parquet
+  partition_cols: [year, month]
+  granularity: 1min
+  symbol: SPXW
+  schema:
+    <<: *contract_cols
+    bid: float32
+    ask: float32
+    delta: float32
+    theta: float32
+    vega: float32
+    rho: float32
+    epsilon: float32
+    lambda: float32
+    implied_vol: float32
+    iv_error: float32
+    underlying_timestamp: utf8
+    underlying_price: float32
+  drop_cols: []
+  cleaning_rules:
+    - filter_bogus_expirations: {}
+    - drop_opening_bar: {time: "09:30:00"}        # underlying_price = 0 and IV overflow at the open
+    - filter_illiquid: {bid_gt: 0.0, implied_vol_lte: 100.0, underlying_price_gt: 0.0}
+    - add_mid: {}
+  index_col: timestamp
+  rows_per_day: 130000
+
+x-quotes: &quotes
+  source_format: parquet
+  partition_cols: [year, month]
+  granularity: 1min
+  symbol: SPXW
+  schema:
+    <<: *contract_cols
+    bid_size: int32
+    bid: float32
+    ask_size: int32
+    ask: float32
+  drop_cols: [bid_exchange, ask_exchange, bid_condition, ask_condition]
+  cleaning_rules:
+    - filter_bogus_expirations: {}
+    - filter_zero_bid: {bid_gt: 0.0}
+    - add_mid: {}
+    - add_spread_pct: {}
+  index_col: timestamp
+  rows_per_day: 130000
+
+x-iv: &iv
+  source_format: parquet
+  partition_cols: [year, month]
+  granularity: 1min
+  symbol: SPXW
+  schema:
+    <<: *contract_cols
+    bid: float32
+    bid_implied_vol: float32
+    midpoint: float32
+    implied_vol: float32
+    ask: float32
+    ask_implied_vol: float32
+    iv_error: float32
+    underlying_timestamp: utf8
+    underlying_price: float32
+  drop_cols: []
+  cleaning_rules:
+    - filter_bogus_expirations: {}
+    - drop_opening_bar: {time: "09:30:00"}
+    - filter_illiquid: {bid_gt: 0.0, underlying_price_gt: 0.0}
+  index_col: timestamp
+  rows_per_day: 130000
+
+# ----------------------------------------------------------------- datasets
+
+datasets:
+
+  # --- indices -------------------------------------------------------------
+  spx_ohlc:
+    <<: *index_ohlc
+    description: "SPX index, 1-minute OHLC bars"
+    symbol: SPX
+    source_path: "index/spx/{date}.parquet"
+    store_path: "store/spx_ohlc/year={year}/month={month:02d}/{date}.parquet"
+
+  vix_ohlc:
+    <<: *index_ohlc
+    description: "VIX index, 1-minute OHLC bars (stale zero prints forward-filled)"
+    symbol: VIX
+    source_path: "index/vix/{date}.parquet"
+    store_path: "store/vix_ohlc/year={year}/month={month:02d}/{date}.parquet"
+    cleaning_rules:
+      - drop_opening_bar: {time: "09:30:00"}
+      - ffill_zero_close: true
+
+  vvix_ohlc:
+    <<: *index_ohlc
+    description: "VVIX index, 1-minute OHLC bars (stale zero prints forward-filled)"
+    symbol: VVIX
+    source_path: "index/vvix/{date}.parquet"
+    store_path: "store/vvix_ohlc/year={year}/month={month:02d}/{date}.parquet"
+    cleaning_rules:
+      - drop_opening_bar: {time: "09:30:00"}
+      - ffill_zero_close: true
+
+  # --- first-order Greeks by days-to-expiry ---------------------------------
+  greeks_0dte:
+    <<: *greeks
+    description: "SPXW first-order Greeks, 1-minute, contracts expiring the same day"
+    source_path: "options/greeks/0dte/{date}.parquet"
+    store_path: "store/greeks_0dte/year={year}/month={month:02d}/{date}.parquet"
+  greeks_1dte:
+    <<: *greeks
+    description: "SPXW first-order Greeks, 1-minute, expiry = next business day"
+    source_path: "options/greeks/1dte/{date}.parquet"
+    store_path: "store/greeks_1dte/year={year}/month={month:02d}/{date}.parquet"
+  greeks_2dte:
+    <<: *greeks
+    description: "SPXW first-order Greeks, 1-minute, expiry = D+2 business days"
+    source_path: "options/greeks/2dte/{date}.parquet"
+    store_path: "store/greeks_2dte/year={year}/month={month:02d}/{date}.parquet"
+  greeks_3dte:
+    <<: *greeks
+    description: "SPXW first-order Greeks, 1-minute, expiry = D+3 business days"
+    source_path: "options/greeks/3dte/{date}.parquet"
+    store_path: "store/greeks_3dte/year={year}/month={month:02d}/{date}.parquet"
+  greeks_4dte:
+    <<: *greeks
+    description: "SPXW first-order Greeks, 1-minute, expiry = D+4 business days"
+    source_path: "options/greeks/4dte/{date}.parquet"
+    store_path: "store/greeks_4dte/year={year}/month={month:02d}/{date}.parquet"
+  greeks_5dte:
+    <<: *greeks
+    description: "SPXW first-order Greeks, 1-minute, expiry = D+5 business days"
+    source_path: "options/greeks/5dte/{date}.parquet"
+    store_path: "store/greeks_5dte/year={year}/month={month:02d}/{date}.parquet"
+  greeks_6dte:
+    <<: *greeks
+    description: "SPXW first-order Greeks, 1-minute, expiry = D+6 business days"
+    source_path: "options/greeks/6dte/{date}.parquet"
+    store_path: "store/greeks_6dte/year={year}/month={month:02d}/{date}.parquet"
+  greeks_7dte:
+    <<: *greeks
+    description: "SPXW first-order Greeks, 1-minute, expiry = D+7 business days"
+    source_path: "options/greeks/7dte/{date}.parquet"
+    store_path: "store/greeks_7dte/year={year}/month={month:02d}/{date}.parquet"
+
+  # --- quotes and implied volatility -----------------------------------------
+  quotes_0dte:
+    <<: *quotes
+    description: "SPXW 0DTE bid/ask quotes per strike and right, 1-minute"
+    source_path: "options/quotes/0dte/{date}.parquet"
+    store_path: "store/quotes_0dte/year={year}/month={month:02d}/{date}.parquet"
+  quotes_1dte:
+    <<: *quotes
+    description: "SPXW 1DTE bid/ask quotes per strike and right, 1-minute"
+    source_path: "options/quotes/1dte/{date}.parquet"
+    store_path: "store/quotes_1dte/year={year}/month={month:02d}/{date}.parquet"
+  iv_0dte:
+    <<: *iv
+    description: "SPXW 0DTE implied-volatility surface (bid/mid/ask IV), 1-minute"
+    source_path: "options/iv/0dte/{date}.parquet"
+    store_path: "store/iv_0dte/year={year}/month={month:02d}/{date}.parquet"
+  iv_1dte:
+    <<: *iv
+    description: "SPXW 1DTE implied-volatility surface (bid/mid/ask IV), 1-minute"
+    source_path: "options/iv/1dte/{date}.parquet"
+    store_path: "store/iv_1dte/year={year}/month={month:02d}/{date}.parquet"
+
+  # --- daily chain snapshots ---------------------------------------------------
+  oi:
+    description: "SPXW open interest, all expirations, daily"
+    source_format: parquet
+    source_path: "options/oi/{date}.parquet"
+    store_path: "store/oi/year={year}/month={month:02d}/{date}.parquet"
+    partition_cols: [year, month]
+    granularity: daily
+    symbol: SPXW
+    schema:
+      <<: *contract_cols
+      open_interest: int32
+    drop_cols: []
+    cleaning_rules:
+      - filter_bogus_expirations: {}
+      - filter_zero_oi: {open_interest_gt: 0}
+    index_col: timestamp
+    rows_per_day: 500
+
+  eod:
+    description: "SPXW end-of-day OHLCV and closing bid/ask, all expirations"
+    source_format: parquet
+    source_path: "options/eod/{date}.parquet"
+    store_path: "store/eod/year={year}/month={month:02d}/{date}.parquet"
+    partition_cols: [year, month]
+    granularity: daily
+    symbol: SPXW
+    schema:
+      symbol: utf8
+      expiration: utf8
+      strike: float32
+      right: utf8
+      created: "timestamp[ns]"
+      last_trade: "timestamp[ns]"
+      open: float32
+      high: float32
+      low: float32
+      close: float32
+      volume: int32
+      count: int32
+      bid_size: int32
+      bid: float32
+      ask_size: int32
+      ask: float32
+    drop_cols: [bid_exchange, ask_exchange, bid_condition, ask_condition]
+    cleaning_rules:
+      - filter_bogus_expirations: {}
+    index_col: created
+    rows_per_day: 10000
+
+  # --- trades and tick Greeks --------------------------------------------------
+  trades_0dte:
+    description: "SPXW 0DTE trade prints per strike and right"
+    source_format: parquet
+    source_path: "spx trade/year={year}/month={month:02d}/SPXW_trade_0dte_1m_{date}.parquet"
+    store_path: "store/trades_0dte/year={year}/month={month:02d}/{date}.parquet"
+    partition_cols: [year, month]
+    granularity: tick
+    symbol: SPXW
+    schema:
+      <<: *contract_cols
+      sequence: int32
+      condition: int16
+      size: int16
+      exchange: int8
+      price: float32
+    drop_cols: [ext_condition1, ext_condition2, ext_condition3, ext_condition4, sequence]
+    cleaning_rules:
+      - filter_zero_price: {price_gt: 0.0}
+    index_col: timestamp
+    rows_per_day: 420000
+
+  greeks_tick:
+    description: "SPXW tick-level Greeks, all expirations (monthly bulk files, streamed)"
+    source_format: parquet
+    source_path: "greeks_tick/year={year}/month={month:02d}/*.parquet"
+    store_path: "store/greeks_tick/year={year}/month={month:02d}/*.parquet"
+    partition_cols: [year, month]
+    granularity: tick
+    symbol: SPXW
+    schema:
+      timestamp: "timestamp[us]"
+      symbol: string
+      strike: float32
+      right: utf8
+      expiry: date32
+      bid: float32
+      ask: float32
+      delta: float32
+      gamma: float32
+      vega: float32
+      theta: float32
+      iv: float32
+      underlying_price: float32
+    drop_cols: []
+    cleaning_rules:
+      - filter_zero_bid: {bid_gt: 0.0}
+      - filter_illiquid: {implied_vol_lte: 100.0}
+      - filter_duplicate_timestamps: {keep: last}
+      - filter_outlier_spread: {max_spread_pct: 5.0}
+    index_col: timestamp
+
+  # --- derived daily regime ----------------------------------------------------
+  vol_regime:
+    description: "Daily volatility regime (VIX/VVIX percentiles, z-scores, labels)"
+    source_format: csv
+    source_path: "vol_regime_daily.csv"
+    store_path: "store/vol_regime/vol_regime.parquet"
+    partition_cols: []
+    granularity: daily
+    symbol: REGIME
+    schema:
+      date: date32
+      vix: float32
+      vvix: float32
+      vov_ratio: float32
+      vix_pct_252: float32
+      vvix_pct_252: float32
+      vov_ratio_pct_252: float32
+      vix_z_20: float32
+      vvix_z_20: float32
+      vov_z_20: float32
+      vix_regime: utf8
+      vvix_regime: utf8
+      vov_regime: utf8
+      regime_score: int8
+      regime_2x2: utf8
+      desk_bucket: utf8
+    drop_cols: []
+    cleaning_rules:
+      - valid_from: "2023-04-13"          # end of the regime warm-up window
+    index_col: date
+    rows_per_day: 1

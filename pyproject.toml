@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spx-pipeline"
+version = "0.2.0"
+description = "Point-in-time data lake for SPX/SPXW options research: Parquet + DuckDB + Polars, with look-ahead guards."
+readme = "README.md"
+license = {text = "Proprietary (all rights reserved)"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Intended Audience :: Financial and Insurance Industry",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "pyarrow>=15",
+    "duckdb>=1.0",
+    "polars>=1.0",
+    "pyyaml>=6.0",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+thetadata = ["pandas>=2.0", "requests>=2.31"]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
+
+[project.scripts]
+spx-pipeline = "spx_pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+spx_pipeline = ["registry.yaml", "vendors/thetadata/*.sh"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]

@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+# data never lives in the repository
+data/
+store/
+*.parquet
+*.feather
+creds.txt
+*.jar
+.env
